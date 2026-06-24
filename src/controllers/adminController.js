@@ -3,6 +3,7 @@ const prisma = require('../config/database');
 const { asyncHandler, fail, ok } = require('../utils/http');
 const { credit } = require('../services/wallet');
 const { notify } = require('../services/notify');
+const { evictUserCache } = require('../middleware/auth');
 
 // GET /admin/dashboard
 exports.dashboard = asyncHandler(async (req, res) => {
@@ -59,6 +60,7 @@ exports.setUserStatus = asyncHandler(async (req, res) => {
   const { status } = req.body;
   if (!['ACTIVE', 'SUSPENDED', 'BANNED'].includes(status)) fail(400, 'Invalid status');
   const user = await prisma.user.update({ where: { id: req.params.id }, data: { status } });
+  evictUserCache(user.id);
   await prisma.auditLog.create({ data: { actorId: req.user.id, action: 'USER_STATUS', entityType: 'User', entityId: user.id, meta: { status } } });
   return ok(res, { user: { id: user.id, status: user.status } });
 });
@@ -120,6 +122,74 @@ exports.resolveReport = asyncHandler(async (req, res) => {
   const updated = await prisma.report.update({ where: { id: report.id }, data: { status: action, resolvedById: req.user.id } });
   return ok(res, { report: updated });
 });
+
+// Areas an admin can be granted. SUPER_ADMIN always has all of them.
+const ADMIN_PERMISSIONS = ['users', 'verifications', 'reports', 'orders', 'vendors', 'analytics'];
+
+// GET /admin/admins  — list admins (super admin only)
+exports.listAdmins = asyncHandler(async (req, res) => {
+  const admins = await prisma.user.findMany({
+    where: { role: { in: ['ADMIN', 'SUPER_ADMIN'] } },
+    orderBy: [{ role: 'desc' }, { createdAt: 'asc' }],
+    select: { id: true, fullName: true, email: true, role: true, adminPermissions: true, status: true, createdAt: true },
+  });
+  return ok(res, { admins, availablePermissions: ADMIN_PERMISSIONS });
+});
+
+// POST /admin/admins  { email, permissions[] }  — promote a user to ADMIN
+exports.addAdmin = asyncHandler(async (req, res) => {
+  const email = (req.body.email || '').trim().toLowerCase();
+  if (!email) fail(400, 'email is required');
+  const permissions = sanitizePermissions(req.body.permissions);
+  const user = await prisma.user.findFirst({ where: { email } });
+  if (!user) fail(404, 'No user with that email — they must sign up first');
+  if (user.role === 'SUPER_ADMIN') fail(400, 'That user is already a super admin');
+  const updated = await prisma.user.update({
+    where: { id: user.id },
+    data: { role: 'ADMIN', adminPermissions: permissions },
+    select: { id: true, fullName: true, email: true, role: true, adminPermissions: true },
+  });
+  evictUserCache(user.id);
+  await prisma.auditLog.create({ data: { actorId: req.user.id, action: 'ADMIN_ADD', entityType: 'User', entityId: user.id, meta: { permissions } } });
+  return ok(res, { admin: updated }, 201);
+});
+
+// PATCH /admin/admins/:id  { permissions?, role? }
+exports.updateAdmin = asyncHandler(async (req, res) => {
+  const target = await prisma.user.findUnique({ where: { id: req.params.id } });
+  if (!target) fail(404, 'Admin not found');
+  if (target.role === 'SUPER_ADMIN') fail(403, 'A super admin cannot be modified');
+  const data = {};
+  if (req.body.permissions !== undefined) data.adminPermissions = sanitizePermissions(req.body.permissions);
+  if (req.body.role && ['ADMIN', 'USER'].includes(req.body.role)) data.role = req.body.role;
+  if (data.role === 'USER') data.adminPermissions = null;
+  const updated = await prisma.user.update({
+    where: { id: target.id }, data,
+    select: { id: true, fullName: true, email: true, role: true, adminPermissions: true },
+  });
+  evictUserCache(target.id);
+  await prisma.auditLog.create({ data: { actorId: req.user.id, action: 'ADMIN_UPDATE', entityType: 'User', entityId: target.id, meta: data } });
+  return ok(res, { admin: updated });
+});
+
+// DELETE /admin/admins/:id  — revoke admin access (back to USER)
+exports.removeAdmin = asyncHandler(async (req, res) => {
+  const target = await prisma.user.findUnique({ where: { id: req.params.id } });
+  if (!target) fail(404, 'Admin not found');
+  if (target.role === 'SUPER_ADMIN') fail(403, 'A super admin cannot be removed');
+  if (target.id === req.user.id) fail(400, 'You cannot remove yourself');
+  await prisma.user.update({ where: { id: target.id }, data: { role: 'USER', adminPermissions: null } });
+  evictUserCache(target.id);
+  await prisma.auditLog.create({ data: { actorId: req.user.id, action: 'ADMIN_REMOVE', entityType: 'User', entityId: target.id } });
+  return ok(res, { removed: true });
+});
+
+function sanitizePermissions(input) {
+  const arr = Array.isArray(input) ? input : [];
+  return arr.filter((p) => ADMIN_PERMISSIONS.includes(p));
+}
+
+exports.ADMIN_PERMISSIONS = ADMIN_PERMISSIONS;
 
 // GET /admin/orders?status  — operations view of delivery orders
 exports.orders = asyncHandler(async (req, res) => {

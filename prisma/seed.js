@@ -166,6 +166,12 @@ async function main() {
   console.log(`Seeded: ${unis} universities, ${cats} categories, ${coupons} coupons, ${vendors} vendors, ${products} products, ${services} services`);
 }
 
-main()
-  .catch((e) => { console.error(e); process.exit(1); })
-  .finally(() => prisma.$disconnect());
+// Run standalone via `npm run seed`; also importable so the server can ensure
+// reference data on boot (see services/bootstrap.js).
+if (require.main === module) {
+  main()
+    .catch((e) => { console.error(e); process.exit(1); })
+    .finally(() => prisma.$disconnect());
+}
+
+module.exports = { main };

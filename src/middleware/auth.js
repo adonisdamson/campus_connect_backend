@@ -64,4 +64,18 @@ function requireRole(...roles) {
   };
 }
 
-module.exports = { authenticate, requireRole, evictUserCache };
+// Admin area gate. SUPER_ADMIN passes everything; ADMIN passes only if the
+// permission key is in their adminPermissions list. Everyone else is denied.
+function requirePermission(permission) {
+  return (req, res, next) => {
+    const u = req.user;
+    if (u.role === 'SUPER_ADMIN') return next();
+    if (u.role === 'ADMIN') {
+      const perms = Array.isArray(u.adminPermissions) ? u.adminPermissions : [];
+      if (perms.includes(permission)) return next();
+    }
+    return res.status(403).json({ success: false, error: 'You do not have access to this area' });
+  };
+}
+
+module.exports = { authenticate, requireRole, requirePermission, evictUserCache };

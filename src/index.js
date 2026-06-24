@@ -66,7 +66,11 @@ initSocket(io);
 
 const PORT = process.env.PORT || 3000;
 if (require.main === module) {
-  httpServer.listen(PORT, () => logger.info(`[Server] Campus Connect API on :${PORT}`));
+  httpServer.listen(PORT, () => {
+    logger.info(`[Server] Campus Connect API on :${PORT}`);
+    // Ensure reference data + super admin exist (idempotent; non-blocking).
+    require('./services/bootstrap').runBootstrap();
+  });
 }
 
 module.exports = { app, httpServer, io };

@@ -39,6 +39,10 @@ model User {
   status     UserStatus @default(ACTIVE)
   isVerified Boolean    @default(false) // identity verified
 
+  // For ADMIN users: which areas they may access (e.g. ["verifications","reports"]).
+  // SUPER_ADMIN implicitly has all permissions and manages other admins.
+  adminPermissions Json?
+
   // capability flags — each unlocked via its own VerificationRequest
   isDriver          Boolean @default(false)
   isVendor          Boolean @default(false)

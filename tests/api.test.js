@@ -18,7 +18,7 @@ const auth = (t) => ({ Authorization: `Bearer ${t}` });
 // call reads role=ADMIN from the DB.
 async function adminUser() {
   const u = await newUser();
-  await prisma.user.update({ where: { id: u.user.id }, data: { role: 'ADMIN' } });
+  await prisma.user.update({ where: { id: u.user.id }, data: { role: 'SUPER_ADMIN' } });
   return u;
 }
 
@@ -240,6 +240,30 @@ describe('Admin gating', () => {
   test('non-admin is forbidden from the dashboard', async () => {
     const { token } = await newUser();
     const res = await api().get('/api/v1/admin/dashboard').set(auth(token));
+    expect(res.status).toBe(403);
+  });
+});
+
+describe('Admin roles & permissions', () => {
+  test('super admin grants a scoped admin, who is limited to their area', async () => {
+    const sa = await adminUser(); // SUPER_ADMIN
+    const staff = await newUser();
+    const add = await api().post('/api/v1/admin/admins').set(auth(sa.token))
+      .send({ email: staff.email, permissions: ['reports'] });
+    expect(add.status).toBe(201);
+    expect(add.body.admin.role).toBe('ADMIN');
+
+    // Allowed area
+    expect((await api().get('/api/v1/admin/reports').set(auth(staff.token))).status).toBe(200);
+    // Not granted 'users'
+    expect((await api().get('/api/v1/admin/users').set(auth(staff.token))).status).toBe(403);
+    // Admin management is super-admin only
+    expect((await api().get('/api/v1/admin/admins').set(auth(staff.token))).status).toBe(403);
+  });
+
+  test('non-super-admin cannot promote admins', async () => {
+    const staff = await newUser();
+    const res = await api().post('/api/v1/admin/admins').set(auth(staff.token)).send({ email: 'x@y.z' });
     expect(res.status).toBe(403);
   });
 });

@@ -30,6 +30,11 @@ const router = Router();
 // ── Uploads (authenticated, rate-limited image upload) ──
 router.post('/uploads', authenticate, rateLimit({ windowMs: 60 * 1000, max: 30 }), uploads.single, uploads.create);
 
+// ── Geo (server-side proxy so the TomTom key stays on the backend) ──
+const geo = require('../controllers/geoController');
+router.get('/geo/search', authenticate, rateLimit({ windowMs: 60 * 1000, max: 60 }), geo.search);
+router.get('/geo/route', authenticate, rateLimit({ windowMs: 60 * 1000, max: 120 }), geo.route);
+
 // ── Auth (public, rate-limited) ──
 router.post('/auth/register', authLimiter, auth.register);
 router.post('/auth/login', authLimiter, auth.login);
@@ -141,17 +146,30 @@ router.patch('/notifications/read-all', authenticate, notifications.markAllRead)
 router.patch('/notifications/:id/read', authenticate, notifications.markRead);
 
 // ── Admin ──
+const { requirePermission } = require('../middleware/auth');
 const adminOnly = [authenticate, requireRole('ADMIN', 'SUPER_ADMIN')];
+const superOnly = [authenticate, requireRole('SUPER_ADMIN')];
+const can = (perm) => [authenticate, requireRole('ADMIN', 'SUPER_ADMIN'), requirePermission(perm)];
+
+// Dashboard + live ops: any admin.
 router.get('/admin/dashboard', ...adminOnly, admin.dashboard);
 router.get('/admin/live', ...adminOnly, admin.live);
-router.get('/admin/users', ...adminOnly, admin.users);
-router.patch('/admin/users/:id', ...adminOnly, admin.setUserStatus);
-router.get('/admin/verifications', ...adminOnly, admin.verifications);
-router.patch('/admin/verifications/:id', ...adminOnly, admin.reviewVerification);
-router.get('/admin/reports', ...adminOnly, admin.reports);
-router.patch('/admin/reports/:id', ...adminOnly, admin.resolveReport);
-router.patch('/admin/vendors/:id', ...adminOnly, admin.setVendorStatus);
-router.get('/admin/orders', ...adminOnly, admin.orders);
-router.post('/admin/orders/:id/refund', ...adminOnly, admin.refundOrder);
+
+// Per-area, permission-gated.
+router.get('/admin/users', ...can('users'), admin.users);
+router.patch('/admin/users/:id', ...can('users'), admin.setUserStatus);
+router.get('/admin/verifications', ...can('verifications'), admin.verifications);
+router.patch('/admin/verifications/:id', ...can('verifications'), admin.reviewVerification);
+router.get('/admin/reports', ...can('reports'), admin.reports);
+router.patch('/admin/reports/:id', ...can('reports'), admin.resolveReport);
+router.patch('/admin/vendors/:id', ...can('vendors'), admin.setVendorStatus);
+router.get('/admin/orders', ...can('orders'), admin.orders);
+router.post('/admin/orders/:id/refund', ...can('orders'), admin.refundOrder);
+
+// Admin management: super admin only.
+router.get('/admin/admins', ...superOnly, admin.listAdmins);
+router.post('/admin/admins', ...superOnly, admin.addAdmin);
+router.patch('/admin/admins/:id', ...superOnly, admin.updateAdmin);
+router.delete('/admin/admins/:id', ...superOnly, admin.removeAdmin);
 
 module.exports = router;

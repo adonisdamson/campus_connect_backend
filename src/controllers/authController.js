@@ -17,6 +17,7 @@ function publicUser(u) {
     status: u.status, isVerified: u.isVerified,
     isDriver: u.isDriver, isVendor: u.isVendor, isServiceProvider: u.isServiceProvider,
     rating: u.rating, referralCode: u.referralCode, universityId: u.universityId,
+    adminPermissions: u.adminPermissions ?? null,
   };
 }
 
