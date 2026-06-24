@@ -35,4 +35,5 @@ jobs:
       - run: npm ci
       - run: npx prisma generate
       - run: npx prisma db push --skip-generate
+      - run: node prisma/seed.js   # categories + coupons + universities the tests rely on
       - run: npm test
