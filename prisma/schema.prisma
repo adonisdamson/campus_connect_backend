@@ -1,0 +1,1043 @@
+// ============================================================
+// CAMPUS CONNECT — schema.prisma  (PostgreSQL)
+// Campus super-app: Rides · Delivery · Marketplace · Services
+// One account, multiple capabilities (rider + driver + vendor + provider)
+// ============================================================
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────── IDENTITY ─────────────────────────
+model User {
+  id           String    @id @default(cuid())
+  email        String?   @unique
+  phone        String?   @unique
+  firebaseUid  String?   @unique
+  passwordHash String?
+  fullName     String?
+  profilePhoto String?
+  gender       Gender?
+  dateOfBirth  DateTime?
+
+  campusRole CampusRole @default(STUDENT) // STUDENT | STAFF | NON_STUDENT
+  studentId  String? // student matric / index number
+  address    String?
+
+  // Multi-campus: which university this user belongs to (pilot = UMaT).
+  universityId String?
+  university   University? @relation(fields: [universityId], references: [id])
+  defaultLat Float?
+  defaultLng Float?
+  fcmToken   String?
+
+  role       Role       @default(USER) // USER | ADMIN | SUPER_ADMIN
+  status     UserStatus @default(ACTIVE)
+  isVerified Boolean    @default(false) // identity verified
+
+  // capability flags — each unlocked via its own VerificationRequest
+  isDriver          Boolean @default(false)
+  isVendor          Boolean @default(false)
+  isServiceProvider Boolean @default(false)
+
+  rating      Float @default(5.0)
+  reviewCount Int   @default(0)
+
+  referralCode String? @unique
+  referredById String?
+
+  // profiles (1:1)
+  driverProfile   DriverProfile?
+  vendor          Vendor?
+  serviceProvider ServiceProviderProfile?
+  wallet          Wallet?
+
+  // relations
+  refreshTokens     RefreshToken[]
+  otpRecords        OtpRecord[]
+  verifications     VerificationRequest[]
+  tripsAsRider      Trip[]                    @relation("RiderTrips")
+  tripsAsDriver     Trip[]                    @relation("DriverTrips")
+  ordersAsCustomer  DeliveryOrder[]           @relation("CustomerOrders")
+  ordersAsCourier   DeliveryOrder[]           @relation("CourierOrders")
+  listings          Listing[]
+  serviceBookings   ServiceBooking[]          @relation("CustomerServiceBookings")
+  reviewsWritten    Review[]                  @relation("ReviewAuthor")
+  reviewsReceived   Review[]                  @relation("ReviewTarget")
+  favorites         Favorite[]
+  reportsFiled      Report[]                  @relation("ReportAuthor")
+  notifications     Notification[]
+  messages          Message[]
+  participants      ConversationParticipant[]
+  payouts           PayoutRequest[]
+  couponRedemptions CouponRedemption[]
+  loyaltyRewards    LoyaltyReward[]
+  auditLogs         AuditLog[]                @relation("ActorAuditLogs")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([defaultLat, defaultLng])
+  @@map("users")
+}
+
+/// A university campus. Campus Connect serves all Ghanaian universities;
+/// `isActive` marks campuses that are live (pilot = UMaT). Others are "coming soon".
+model University {
+  id        String   @id @default(cuid())
+  name      String
+  shortName String   @unique
+  city      String
+  region    String?
+  lat       Float
+  lng       Float
+  isActive  Boolean  @default(false)
+  users     User[]
+  createdAt DateTime @default(now())
+
+  @@map("universities")
+}
+
+enum Role {
+  USER
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum CampusRole {
+  STUDENT
+  STAFF
+  NON_STUDENT
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum UserStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  BANNED
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@map("refresh_tokens")
+}
+
+model OtpRecord {
+  id        String     @id @default(cuid())
+  phone     String
+  otp       String
+  purpose   OtpPurpose
+  expiresAt DateTime
+  used      Boolean    @default(false)
+  userId    String?
+  user      User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime   @default(now())
+
+  @@map("otp_records")
+}
+
+enum OtpPurpose {
+  REGISTRATION
+  LOGIN
+  PASSWORD_RESET
+}
+
+// ──────────────────── VERIFICATION (KYC) ────────────────────
+model VerificationRequest {
+  id     String             @id @default(cuid())
+  userId String
+  user   User               @relation(fields: [userId], references: [id])
+  type   VerificationType
+  status VerificationStatus @default(PENDING)
+
+  idDocType       IdDocType
+  idNumber        String?
+  idFrontUrl      String
+  idBackUrl       String?
+  selfieUrl       String
+  faceMatchScore  Float?
+  faceMatchPassed Boolean?
+
+  reviewedById String?
+  reviewNote   String?
+  submittedAt  DateTime  @default(now())
+  reviewedAt   DateTime?
+
+  @@index([status, type])
+  @@map("verification_requests")
+}
+
+enum VerificationType {
+  DRIVER
+  VENDOR
+  SERVICE_PROVIDER
+}
+
+enum VerificationStatus {
+  PENDING
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+}
+
+enum IdDocType {
+  GHANA_CARD
+  PASSPORT
+  DRIVERS_LICENSE
+  STUDENT_ID
+  VOTER_ID
+}
+
+// ───────────────────── DRIVER / PARTNER ─────────────────────
+model DriverProfile {
+  id       String        @id @default(cuid())
+  userId   String        @unique
+  user     User          @relation(fields: [userId], references: [id])
+  isOnline Boolean       @default(false)
+  status   PartnerStatus @default(PENDING)
+
+  // what this partner serves
+  doesRides    Boolean @default(true)
+  doesDelivery Boolean @default(false)
+
+  currentLat Float?
+  currentLng Float?
+  bearing    Float?
+  lastSeenAt DateTime?
+
+  ratingAvg      Float @default(5.0)
+  ratingCount    Int   @default(0)
+  totalTrips     Int   @default(0)
+  acceptanceRate Float @default(100)
+  completionRate Float @default(100)
+
+  vehicle     Vehicle?
+  sessions    DriverSession[]
+  assignments TripAssignment[]
+
+  @@index([isOnline, currentLat, currentLng])
+  @@map("driver_profiles")
+}
+
+enum PartnerStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  OFFLINE
+}
+
+model Vehicle {
+  id           String        @id @default(cuid())
+  driverId     String        @unique
+  driver       DriverProfile @relation(fields: [driverId], references: [id])
+  type         VehicleType // CAR | MOTORCYCLE
+  make         String?
+  model        String?
+  color        String?
+  plate        String
+  year         Int?
+  capacity     Int           @default(4)
+  photoUrl     String?
+  licenseUrl   String?
+  insuranceUrl String?
+  status       VehicleStatus @default(PENDING)
+  createdAt    DateTime      @default(now())
+
+  @@map("vehicles")
+}
+
+enum VehicleType {
+  CAR
+  MOTORCYCLE
+}
+
+enum VehicleStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model DriverSession {
+  id        String        @id @default(cuid())
+  driverId  String
+  driver    DriverProfile @relation(fields: [driverId], references: [id])
+  startedAt DateTime      @default(now())
+  endedAt   DateTime?
+
+  @@map("driver_sessions")
+}
+
+// ──────────────────────────── RIDES ─────────────────────────
+model Trip {
+  id       String     @id @default(cuid())
+  riderId  String
+  rider    User       @relation("RiderTrips", fields: [riderId], references: [id])
+  driverId String?
+  driver   User?      @relation("DriverTrips", fields: [driverId], references: [id])
+  rideClass RideClass
+  status    TripStatus @default(SEARCHING)
+  isShared  Boolean    @default(false)
+  scheduledAt DateTime?
+
+  pickupAddress  String
+  pickupLat      Float
+  pickupLng      Float
+  dropoffAddress String
+  dropoffLat     Float
+  dropoffLng     Float
+  stops          Json? // multi-stop / shared route
+
+  distanceMeters  Int?
+  durationSeconds Int?
+  fareEstimate    Decimal  @db.Decimal(10, 2)
+  fareFinal       Decimal? @db.Decimal(10, 2)
+  surgeMultiplier Float    @default(1.0)
+  tipAmount       Decimal? @db.Decimal(10, 2)
+
+  paymentMethod PaymentMethod
+  paymentStatus PaymentStatus @default(UNPAID)
+  paymentRef    String?       @unique
+
+  assignments    TripAssignment[]
+  conversation   Conversation?    @relation(fields: [conversationId], references: [id])
+  conversationId String?
+
+  dispatchAttempts Int       @default(0)
+  searchingAt      DateTime?
+  assignedAt       DateTime?
+  acceptedAt       DateTime?
+  arrivingAt       DateTime?
+  arrivedAt        DateTime?
+  startedAt        DateTime?
+  completedAt      DateTime?
+  cancelledAt      DateTime?
+  cancelReason     String?
+  cancelledById    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([riderId, createdAt(sort: Desc)])
+  @@index([driverId, status])
+  @@index([status, pickupLat, pickupLng])
+  @@map("trips")
+}
+
+enum RideClass {
+  ECONOMY
+  PREMIUM
+  BIKE
+  SHARED
+}
+
+enum TripStatus {
+  SEARCHING
+  DRIVER_ASSIGNED
+  ACCEPTED
+  ARRIVING
+  ARRIVED
+  IN_PROGRESS
+  COMPLETED
+  UNASSIGNED
+  CANCELLED
+}
+
+model TripAssignment {
+  id          String           @id @default(cuid())
+  tripId      String
+  trip        Trip             @relation(fields: [tripId], references: [id])
+  driverId    String
+  driver      DriverProfile    @relation(fields: [driverId], references: [id])
+  status      AssignmentStatus @default(OFFERED)
+  offeredAt   DateTime         @default(now())
+  respondedAt DateTime?
+
+  @@index([tripId, status])
+  @@map("trip_assignments")
+}
+
+enum AssignmentStatus {
+  OFFERED
+  ACCEPTED
+  DECLINED
+  EXPIRED
+  CANCELLED
+}
+
+// ─────────────────── VENDORS (food / shop) ──────────────────
+model Vendor {
+  id              String         @id @default(cuid())
+  ownerId         String         @unique
+  owner           User           @relation(fields: [ownerId], references: [id])
+  name            String
+  description     String?
+  category        VendorCategory
+  logoUrl         String?
+  coverUrl        String?
+  address         String
+  lat             Float
+  lng             Float
+  isOpen          Boolean        @default(false)
+  openingHours    Json?
+  prepTimeMinutes Int            @default(20)
+  ratingAvg       Float          @default(5.0)
+  ratingCount     Int            @default(0)
+  status          ApprovalStatus @default(PENDING)
+
+  products  Product[]
+  orders    DeliveryOrder[]
+  createdAt DateTime        @default(now())
+
+  @@index([lat, lng])
+  @@map("vendors")
+}
+
+enum VendorCategory {
+  RESTAURANT
+  FAST_FOOD
+  GROCERY
+  PHARMACY
+  CONVENIENCE
+  GAS
+  BAKERY
+  OTHER
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+model Product {
+  id          String      @id @default(cuid())
+  vendorId    String
+  vendor      Vendor      @relation(fields: [vendorId], references: [id])
+  name        String
+  description String?
+  imageUrl    String?
+  price       Decimal     @db.Decimal(10, 2)
+  category    String?
+  isAvailable Boolean     @default(true)
+  // Optional modifier groups, e.g.
+  // [{ "name": "Size", "required": true, "multi": false,
+  //    "choices": [{ "label": "Large", "price": 3 }] }]
+  options     Json?
+  orderItems  OrderItem[]
+
+  @@map("products")
+}
+
+// ────────────────────────── DELIVERY ────────────────────────
+model DeliveryOrder {
+  id         String       @id @default(cuid())
+  customerId String
+  customer   User         @relation("CustomerOrders", fields: [customerId], references: [id])
+  courierId  String?
+  courier    User?        @relation("CourierOrders", fields: [courierId], references: [id])
+  vendorId   String?
+  vendor     Vendor?      @relation(fields: [vendorId], references: [id])
+
+  type   DeliveryType
+  status OrderStatus  @default(PENDING)
+
+  items             OrderItem[]
+  parcelDescription String? // for PARCEL / SHOPPING / GAS
+  parcelSizeKg      Float?
+
+  pickupAddress  String
+  pickupLat      Float
+  pickupLng      Float
+  dropoffAddress String
+  dropoffLat     Float
+  dropoffLng     Float
+  notes          String?
+
+  subtotal    Decimal @default(0) @db.Decimal(10, 2)
+  deliveryFee Decimal @db.Decimal(10, 2)
+  serviceFee  Decimal @default(0) @db.Decimal(10, 2)
+  total       Decimal @db.Decimal(10, 2)
+
+  paymentMethod PaymentMethod
+  paymentStatus PaymentStatus @default(UNPAID)
+  paymentRef    String?       @unique
+
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id])
+
+  confirmedAt  DateTime?
+  readyAt      DateTime?
+  pickedUpAt   DateTime?
+  deliveredAt  DateTime?
+  cancelledAt  DateTime?
+  cancelReason String?
+
+  refundedAt    DateTime?
+  refundAmount  Decimal?  @db.Decimal(10, 2)
+  refundReason  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([customerId, createdAt(sort: Desc)])
+  @@index([courierId, status])
+  @@index([status, pickupLat, pickupLng])
+  @@map("delivery_orders")
+}
+
+enum DeliveryType {
+  FOOD
+  PARCEL
+  SHOPPING
+  GAS
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PREPARING
+  READY
+  COURIER_ASSIGNED
+  PICKED_UP
+  IN_TRANSIT
+  DELIVERED
+  CANCELLED
+}
+
+model OrderItem {
+  id        String        @id @default(cuid())
+  orderId   String
+  order     DeliveryOrder @relation(fields: [orderId], references: [id])
+  productId String?
+  product   Product?      @relation(fields: [productId], references: [id])
+  name      String
+  quantity  Int           @default(1)
+  unitPrice Decimal       @db.Decimal(10, 2)
+  lineTotal Decimal       @db.Decimal(10, 2)
+  notes     String?
+  // Snapshot of chosen modifiers: [{ "group": "Size", "label": "Large", "price": 3 }]
+  options   Json?
+
+  @@map("order_items")
+}
+
+// ─────────────────────── MARKETPLACE ────────────────────────
+model Listing {
+  id            String         @id @default(cuid())
+  sellerId      String
+  seller        User           @relation(fields: [sellerId], references: [id])
+  categoryId    String
+  category      Category       @relation(fields: [categoryId], references: [id])
+  title         String
+  description   String
+  price         Decimal        @db.Decimal(10, 2)
+  negotiable    Boolean        @default(false)
+  condition     ItemCondition  @default(USED)
+  status        ListingStatus  @default(ACTIVE)
+  locationName  String?
+  lat           Float?
+  lng           Float?
+  viewCount     Int            @default(0)
+  favoriteCount Int            @default(0)
+  images        ListingImage[]
+  favorites     Favorite[]
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@index([categoryId, status, createdAt(sort: Desc)])
+  @@map("listings")
+}
+
+enum ItemCondition {
+  NEW
+  LIKE_NEW
+  USED
+  FOR_PARTS
+}
+
+enum ListingStatus {
+  DRAFT
+  ACTIVE
+  SOLD
+  REMOVED
+  FLAGGED
+}
+
+model ListingImage {
+  id        String  @id @default(cuid())
+  listingId String
+  listing   Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  url       String
+  position  Int     @default(0)
+
+  @@map("listing_images")
+}
+
+model Category {
+  id       String           @id @default(cuid())
+  name     String
+  slug     String           @unique
+  type     CategoryType
+  icon     String?
+  parentId String?
+  listings Listing[]
+  services ServiceListing[]
+
+  @@map("categories")
+}
+
+enum CategoryType {
+  MARKETPLACE
+  SERVICE
+  VENDOR
+}
+
+model Favorite {
+  id        String          @id @default(cuid())
+  userId    String
+  user      User            @relation(fields: [userId], references: [id])
+  listingId String?
+  listing   Listing?        @relation(fields: [listingId], references: [id])
+  serviceId String?
+  service   ServiceListing? @relation(fields: [serviceId], references: [id])
+  createdAt DateTime        @default(now())
+
+  @@unique([userId, listingId])
+  @@unique([userId, serviceId])
+  @@map("favorites")
+}
+
+// ──────────────────── SERVICES MARKETPLACE ──────────────────
+model ServiceProviderProfile {
+  id          String           @id @default(cuid())
+  userId      String           @unique
+  user        User             @relation(fields: [userId], references: [id])
+  bio         String?
+  status      ApprovalStatus   @default(PENDING)
+  ratingAvg   Float            @default(5.0)
+  ratingCount Int              @default(0)
+  services    ServiceListing[]
+
+  @@map("service_provider_profiles")
+}
+
+model ServiceListing {
+  id          String                 @id @default(cuid())
+  providerId  String
+  provider    ServiceProviderProfile @relation(fields: [providerId], references: [id])
+  categoryId  String
+  category    Category               @relation(fields: [categoryId], references: [id])
+  title       String
+  description String
+  basePrice   Decimal                @db.Decimal(10, 2)
+  priceType   PriceType              @default(STARTING_AT)
+  coverUrl    String?
+  gallery     Json?
+  availability Json?
+  lat         Float?
+  lng         Float?
+  ratingAvg   Float                  @default(5.0)
+  ratingCount Int                    @default(0)
+  status      ListingStatus          @default(ACTIVE)
+  favorites   Favorite[]
+  bookings    ServiceBooking[]
+  createdAt   DateTime               @default(now())
+
+  @@index([categoryId, status])
+  @@map("service_listings")
+}
+
+enum PriceType {
+  FIXED
+  HOURLY
+  STARTING_AT
+}
+
+model ServiceBooking {
+  id             String               @id @default(cuid())
+  serviceId      String
+  service        ServiceListing       @relation(fields: [serviceId], references: [id])
+  customerId     String
+  customer       User                 @relation("CustomerServiceBookings", fields: [customerId], references: [id])
+  status         ServiceBookingStatus @default(REQUESTED)
+  scheduledAt    DateTime?
+  agreedPrice    Decimal?             @db.Decimal(10, 2)
+  notes          String?
+  paymentStatus  PaymentStatus        @default(UNPAID)
+  conversationId String?
+  conversation   Conversation?        @relation(fields: [conversationId], references: [id])
+  createdAt      DateTime             @default(now())
+
+  @@map("service_bookings")
+}
+
+enum ServiceBookingStatus {
+  REQUESTED
+  ACCEPTED
+  DECLINED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+// ────────────────── REVIEWS (polymorphic) ───────────────────
+model Review {
+  id           String        @id @default(cuid())
+  authorId     String
+  author       User          @relation("ReviewAuthor", fields: [authorId], references: [id])
+  targetUserId String?
+  targetUser   User?         @relation("ReviewTarget", fields: [targetUserId], references: [id])
+  subjectType  ReviewSubject
+  subjectId    String
+  rating       Int // 1..5
+  comment      String?
+  createdAt    DateTime      @default(now())
+
+  @@index([subjectType, subjectId])
+  @@map("reviews")
+}
+
+enum ReviewSubject {
+  DRIVER
+  TRIP
+  VENDOR
+  ORDER
+  LISTING
+  SERVICE
+  SERVICE_PROVIDER
+}
+
+// ─────────────────────────── CHAT ───────────────────────────
+model Conversation {
+  id              String                    @id @default(cuid())
+  type            ConversationType
+  contextId       String? // tripId / orderId / listingId / serviceBookingId
+  participants    ConversationParticipant[]
+  messages        Message[]
+  trips           Trip[]
+  orders          DeliveryOrder[]
+  serviceBookings ServiceBooking[]
+  createdAt       DateTime                  @default(now())
+
+  @@map("conversations")
+}
+
+enum ConversationType {
+  RIDE
+  ORDER
+  MARKETPLACE
+  SERVICE
+  DIRECT
+}
+
+model ConversationParticipant {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  userId         String
+  user           User         @relation(fields: [userId], references: [id])
+  lastReadAt     DateTime?
+
+  @@unique([conversationId, userId])
+  @@map("conversation_participants")
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  senderId       String
+  sender         User         @relation(fields: [senderId], references: [id])
+  body           String?
+  attachmentUrl  String?
+  type           MessageType  @default(TEXT)
+  sentAt         DateTime     @default(now())
+  readAt         DateTime?
+
+  @@index([conversationId, sentAt])
+  @@map("messages")
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  LOCATION
+  SYSTEM
+}
+
+// ─────────────────── WALLET & PAYMENTS ──────────────────────
+model Wallet {
+  id            String              @id @default(cuid())
+  userId        String              @unique
+  user          User                @relation(fields: [userId], references: [id])
+  balance       Decimal             @default(0) @db.Decimal(12, 2)
+  escrowBalance Decimal             @default(0) @db.Decimal(12, 2)
+  currency      String              @default("GHS")
+  transactions  WalletTransaction[]
+
+  @@map("wallets")
+}
+
+model WalletTransaction {
+  id           String          @id @default(cuid())
+  walletId     String
+  wallet       Wallet          @relation(fields: [walletId], references: [id])
+  type         TransactionType
+  amount       Decimal         @db.Decimal(12, 2)
+  balanceAfter Decimal         @db.Decimal(12, 2)
+  status       TxStatus        @default(SUCCESS)
+  reference    String?         @unique
+  contextType  String?
+  contextId    String?
+  meta         Json?
+  createdAt    DateTime        @default(now())
+
+  @@map("wallet_transactions")
+}
+
+enum TransactionType {
+  TOPUP
+  RIDE_PAYMENT
+  ORDER_PAYMENT
+  SERVICE_PAYMENT
+  PAYOUT
+  REFUND
+  REWARD
+  TIP
+  FEE
+}
+
+enum TxStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  REVERSED
+}
+
+model PaymentTransaction {
+  id          String          @id @default(cuid())
+  userId      String
+  provider    PaymentProvider @default(PAYSTACK)
+  method      PaymentMethod
+  amount      Decimal         @db.Decimal(12, 2)
+  status      PaymentStatus   @default(PENDING)
+  reference   String          @unique
+  purpose     String // TOPUP / TRIP / ORDER / SERVICE
+  contextType String?
+  contextId   String?
+  createdAt   DateTime        @default(now())
+
+  @@map("payment_transactions")
+}
+
+enum PaymentProvider {
+  PAYSTACK
+  MOMO
+}
+
+enum PaymentMethod {
+  WALLET
+  CASH
+  MTN_MOMO
+  TELECEL_CASH
+  AIRTELTIGO
+  CARD
+}
+
+enum PaymentStatus {
+  UNPAID
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+model PayoutRequest {
+  id          String       @id @default(cuid())
+  userId      String
+  user        User         @relation(fields: [userId], references: [id])
+  amount      Decimal      @db.Decimal(12, 2)
+  momoNumber  String
+  network     String
+  status      PayoutStatus @default(PENDING)
+  reference   String?
+  requestedAt DateTime     @default(now())
+  processedAt DateTime?
+
+  @@map("payout_requests")
+}
+
+enum PayoutStatus {
+  PENDING
+  PROCESSING
+  PAID
+  FAILED
+}
+
+model Coupon {
+  code           String  @id // human-typed code is the natural key
+  type           CouponType
+  value          Decimal  @db.Decimal(10, 2)
+  minSpend       Decimal? @db.Decimal(10, 2)
+  maxRedemptions Int?
+  perUserLimit   Int      @default(1)
+  appliesTo      String? // RIDE / ORDER / SERVICE / ALL
+  expiresAt      DateTime?
+  isActive       Boolean  @default(true)
+  redemptions    CouponRedemption[]
+
+  @@map("coupons")
+}
+
+enum CouponType {
+  PERCENT
+  FIXED
+}
+
+model CouponRedemption {
+  id          String   @id @default(cuid())
+  couponCode  String
+  coupon      Coupon   @relation(fields: [couponCode], references: [code])
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  contextType String?
+  contextId   String?
+  amount      Decimal  @db.Decimal(10, 2)
+  createdAt   DateTime @default(now())
+
+  @@map("coupon_redemptions")
+}
+
+model LoyaltyReward {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  points    Int
+  type      String // EARNED / REDEEMED
+  note      String?
+  createdAt DateTime @default(now())
+
+  @@map("loyalty_rewards")
+}
+
+// ──────────────── NOTIFICATIONS / MODERATION ────────────────
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id])
+  title     String
+  body      String
+  type      NotificationType
+  data      Json?
+  isRead    Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  @@index([userId, isRead, createdAt(sort: Desc)])
+  @@map("notifications")
+}
+
+enum NotificationType {
+  RIDE
+  DELIVERY
+  MARKETPLACE
+  SERVICE
+  PAYMENT
+  PROMO
+  SYSTEM
+  CHAT
+}
+
+model Report {
+  id           String       @id @default(cuid())
+  reporterId   String
+  reporter     User         @relation("ReportAuthor", fields: [reporterId], references: [id])
+  targetType   ReportTarget
+  targetId     String
+  reason       String
+  note         String?
+  status       ReportStatus @default(OPEN)
+  resolvedById String?
+  createdAt    DateTime     @default(now())
+
+  @@index([status, targetType])
+  @@map("reports")
+}
+
+enum ReportTarget {
+  LISTING
+  USER
+  VENDOR
+  SERVICE
+  TRIP
+  ORDER
+  MESSAGE
+}
+
+enum ReportStatus {
+  OPEN
+  REVIEWING
+  ACTIONED
+  DISMISSED
+}
+
+// ──────────────────────── INFRA ─────────────────────────────
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  actor      User?    @relation("ActorAuditLogs", fields: [actorId], references: [id])
+  action     String
+  entityType String
+  entityId   String?
+  meta       Json?
+  createdAt  DateTime @default(now())
+
+  @@map("audit_logs")
+}
+
+model IdempotencyKey {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  response  Json?
+  createdAt DateTime @default(now())
+
+  @@map("idempotency_keys")
+}
+
+model WebhookEvent {
+  id          String    @id @default(cuid())
+  provider    String
+  eventId     String    @unique
+  payload     Json
+  processedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@map("webhook_events")
+}
+
+model SurgeZone {
+  id               String   @id @default(cuid())
+  geohash          String   @unique
+  multiplier       Float    @default(1.0)
+  activeRides      Int      @default(0)
+  availableDrivers Int      @default(0)
+  updatedAt        DateTime @updatedAt
+
+  @@map("surge_zones")
+}
