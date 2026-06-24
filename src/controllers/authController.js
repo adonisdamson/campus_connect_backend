@@ -25,6 +25,14 @@ async function ensureWallet(userId) {
   await prisma.wallet.upsert({ where: { userId }, update: {}, create: { userId } });
 }
 
+// Promote the configured super admin the moment they authenticate (so the very
+// first sign-in grants full access — no waiting for a server reboot).
+async function maybePromoteSuperAdmin(user) {
+  const target = (process.env.SUPER_ADMIN_EMAIL || '').trim().toLowerCase();
+  if (!target || !user?.email || user.email.toLowerCase() !== target || user.role === 'SUPER_ADMIN') return user;
+  return prisma.user.update({ where: { id: user.id }, data: { role: 'SUPER_ADMIN' } });
+}
+
 function genReferral() {
   return 'CC' + crypto.randomBytes(3).toString('hex').toUpperCase();
 }
@@ -48,7 +56,7 @@ exports.register = asyncHandler(async (req, res) => {
   }
 
   const passwordHash = await bcrypt.hash(password, 10);
-  const user = await prisma.user.create({
+  let user = await prisma.user.create({
     data: {
       email, phone, fullName, passwordHash,
       campusRole: campusRole || 'STUDENT',
@@ -58,6 +66,7 @@ exports.register = asyncHandler(async (req, res) => {
     },
   });
   await ensureWallet(user.id);
+  user = await maybePromoteSuperAdmin(user);
 
   const tokens = await issueSession(user);
   logger.info('[Auth] Registered', { userId: user.id });
@@ -69,7 +78,7 @@ exports.login = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) fail(400, 'Email and password are required');
 
-  const user = await prisma.user.findUnique({ where: { email } });
+  let user = await prisma.user.findUnique({ where: { email } });
   if (!user || !user.passwordHash) fail(401, 'Invalid credentials');
   if (user.status === 'BANNED') fail(403, 'This account has been banned');
 
@@ -77,6 +86,7 @@ exports.login = asyncHandler(async (req, res) => {
   if (!valid) fail(401, 'Invalid credentials');
 
   await ensureWallet(user.id);
+  user = await maybePromoteSuperAdmin(user);
   const tokens = await issueSession(user);
   return ok(res, { user: publicUser(user), ...tokens });
 });
@@ -112,6 +122,7 @@ exports.google = asyncHandler(async (req, res) => {
     user = await prisma.user.update({ where: { id: user.id }, data: { firebaseUid: decoded.uid } });
   }
   await ensureWallet(user.id);
+  user = await maybePromoteSuperAdmin(user);
   const tokens = await issueSession(user);
   return ok(res, { user: publicUser(user), ...tokens });
 });
