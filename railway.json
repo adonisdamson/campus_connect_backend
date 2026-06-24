@@ -4,7 +4,7 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "npx prisma db push --skip-generate --accept-data-loss && node src/index.js",
+    "startCommand": "npx prisma db push --skip-generate --accept-data-loss && (node prisma/seed.js || true) && node src/index.js",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 120,
     "restartPolicyType": "ON_FAILURE",
