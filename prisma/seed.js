@@ -32,88 +32,9 @@ const COUPONS = [
   { code: 'CAMPUS20', type: 'PERCENT', value: 20, maxRedemptions: 500, perUserLimit: 1, appliesTo: 'SERVICE', minSpend: 0 },
 ];
 
-// Demo vendors with menus at the pilot campus (UMaT, Tarkwa), so the food flow
-// is browsable out of the box.
-const VENDORS = [
-  {
-    email: 'jollof.hub@campusconnect.demo', name: 'Campus Jollof Hub', category: 'RESTAURANT',
-    address: 'UMaT Campus Food Court', lat: 5.302, lng: -1.995, prep: 18,
-    products: [
-      ['Jollof + Chicken', 'Smoky party jollof with grilled chicken', 25],
-      ['Fried Rice + Beef', 'Veg fried rice with tender beef', 28],
-      ['Waakye Special', 'Waakye with egg, gari & shito', 20],
-      ['Kelewele', 'Spiced fried plantain cup', 8],
-    ],
-  },
-  {
-    email: 'bites.corner@campusconnect.demo', name: 'Bites Corner', category: 'FAST_FOOD',
-    address: 'Tarkwa Town Junction', lat: 5.310, lng: -1.998, prep: 12,
-    products: [
-      ['Chicken Burger', 'Crispy fillet, lettuce, house sauce', 22],
-      ['Shawarma', 'Chicken shawarma with fries', 18],
-      ['Meat Pie', 'Flaky pastry, seasoned mince', 6],
-      ['Bottled Water', '500ml', 3],
-    ],
-  },
-];
-
-async function seedVendors(pilot) {
-  for (const v of VENDORS) {
-    const owner = await prisma.user.upsert({
-      where: { email: v.email },
-      update: { isVendor: true, universityId: pilot?.id },
-      create: { email: v.email, fullName: v.name, isVendor: true, campusRole: 'NON_STUDENT', universityId: pilot?.id },
-    });
-    const existing = await prisma.vendor.findUnique({ where: { ownerId: owner.id } });
-    const vendor = existing
-      ? await prisma.vendor.update({ where: { id: existing.id }, data: { status: 'APPROVED', isOpen: true } })
-      : await prisma.vendor.create({
-          data: {
-            ownerId: owner.id, name: v.name, category: v.category, address: v.address,
-            lat: v.lat, lng: v.lng, prepTimeMinutes: v.prep, status: 'APPROVED', isOpen: true, ratingAvg: 4.6, ratingCount: 24,
-          },
-        });
-    const have = await prisma.product.count({ where: { vendorId: vendor.id } });
-    if (have === 0) {
-      await prisma.product.createMany({
-        data: v.products.map(([name, description, price]) => ({ vendorId: vendor.id, name, description, price })),
-      });
-    }
-  }
-}
-
-const SERVICES = [
-  { title: 'Braids & Cornrows', cat: 'hair', price: 60, priceType: 'STARTING_AT', desc: 'Knotless braids, cornrows & twists. Hostel visits available.' },
-  { title: 'Gel & Acrylic Nails', cat: 'nails', price: 45, priceType: 'STARTING_AT', desc: 'Manicure, gel polish and acrylic sets.' },
-  { title: 'Maths & Stats Tutoring', cat: 'tutoring', price: 30, priceType: 'HOURLY', desc: 'First-year calculus, stats and engineering maths.' },
-  { title: 'Express Printing & Binding', cat: 'printing', price: 5, priceType: 'STARTING_AT', desc: 'Project printing, binding and lamination near campus.' },
-];
-
-async function seedServices(pilot) {
-  const owner = await prisma.user.upsert({
-    where: { email: 'provider.demo@campusconnect.demo' },
-    update: { isServiceProvider: true, universityId: pilot?.id },
-    create: { email: 'provider.demo@campusconnect.demo', fullName: 'Akua Studio', isServiceProvider: true, campusRole: 'STUDENT', universityId: pilot?.id },
-  });
-  const provider = await prisma.serviceProviderProfile.upsert({
-    where: { userId: owner.id },
-    update: { status: 'APPROVED' },
-    create: { userId: owner.id, bio: 'Campus beauty & study services', status: 'APPROVED', ratingAvg: 4.7, ratingCount: 31 },
-  });
-  for (const s of SERVICES) {
-    const category = await prisma.category.findUnique({ where: { slug: s.cat } });
-    if (!category) continue;
-    const exists = await prisma.serviceListing.findFirst({ where: { providerId: provider.id, title: s.title } });
-    if (exists) continue;
-    await prisma.serviceListing.create({
-      data: {
-        providerId: provider.id, categoryId: category.id, title: s.title, description: s.desc,
-        basePrice: s.price, priceType: s.priceType, ratingAvg: 4.7, ratingCount: 12,
-        lat: 5.302, lng: -1.995,
-      },
-    });
-  }
-}
+// NOTE (V5): all demo vendors / products / services / providers were removed.
+// The app shows ONLY real data created by real users; screens render proper
+// empty states until then. Seed now provisions reference data exclusively.
 
 // Ghanaian universities. Campus Connect serves them all; UMaT is the live pilot
 // (isActive: true), the rest are "coming soon".
@@ -139,7 +60,37 @@ async function seedUniversities() {
   return prisma.university.findUnique({ where: { shortName: 'UMaT' } });
 }
 
+// Remove any previously-seeded demo content (identified by the @campusconnect.demo
+// owner emails) so production shows real data only. Idempotent + defensive: a
+// failure on any step is logged and skipped, never crashing the deploy.
+async function purgeDemo() {
+  try {
+    const demo = await prisma.user.findMany({
+      where: { email: { endsWith: '@campusconnect.demo' } }, select: { id: true },
+    });
+    if (demo.length === 0) return;
+    const ids = demo.map((u) => u.id);
+    const vendors = await prisma.vendor.findMany({ where: { ownerId: { in: ids } }, select: { id: true } });
+    const vIds = vendors.map((v) => v.id);
+    if (vIds.length) {
+      await prisma.product.deleteMany({ where: { vendorId: { in: vIds } } }).catch(() => {});
+      await prisma.vendor.deleteMany({ where: { id: { in: vIds } } }).catch(() => {});
+    }
+    const profs = await prisma.serviceProviderProfile.findMany({ where: { userId: { in: ids } }, select: { id: true } });
+    const pIds = profs.map((p) => p.id);
+    if (pIds.length) {
+      await prisma.serviceListing.deleteMany({ where: { providerId: { in: pIds } } }).catch(() => {});
+      await prisma.serviceProviderProfile.deleteMany({ where: { id: { in: pIds } } }).catch(() => {});
+    }
+    await prisma.user.deleteMany({ where: { id: { in: ids } } }).catch(() => {});
+    console.log(`Purged ${ids.length} demo account(s) and their content`);
+  } catch (e) {
+    console.error('[seed] purgeDemo skipped:', e.message);
+  }
+}
+
 async function main() {
+  await purgeDemo();
   const groups = [['MARKETPLACE', MARKETPLACE], ['SERVICE', SERVICE], ['VENDOR', VENDOR]];
   for (const [type, items] of groups) {
     for (const [name, icon] of items) {
@@ -154,16 +105,11 @@ async function main() {
   for (const c of COUPONS) {
     await prisma.coupon.upsert({ where: { code: c.code }, update: c, create: c });
   }
-  const pilot = await seedUniversities();
-  await seedVendors(pilot);
-  await seedServices(pilot);
+  await seedUniversities();
   const cats = await prisma.category.count();
   const coupons = await prisma.coupon.count();
   const unis = await prisma.university.count();
-  const vendors = await prisma.vendor.count();
-  const products = await prisma.product.count();
-  const services = await prisma.serviceListing.count();
-  console.log(`Seeded: ${unis} universities, ${cats} categories, ${coupons} coupons, ${vendors} vendors, ${products} products, ${services} services`);
+  console.log(`Seeded reference data only: ${unis} universities, ${cats} categories, ${coupons} coupons (no demo content — real data only)`);
 }
 
 // Run standalone via `npm run seed`; also importable so the server can ensure
@@ -174,4 +120,4 @@ if (require.main === module) {
     .finally(() => prisma.$disconnect());
 }
 
-module.exports = { main };
+module.exports = { main, purgeDemo };

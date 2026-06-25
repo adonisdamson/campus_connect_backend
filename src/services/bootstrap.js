@@ -34,8 +34,18 @@ async function ensureSuperAdmin() {
   }
 }
 
+// Purge any previously-seeded demo content so production shows real data only.
+async function purgeDemoData() {
+  try {
+    await require('../../prisma/seed').purgeDemo();
+  } catch (e) {
+    logger.error('[Bootstrap] purgeDemo failed', { message: e.message });
+  }
+}
+
 async function runBootstrap() {
   await ensureSeedData();
+  await purgeDemoData();
   await ensureSuperAdmin();
 }
 
