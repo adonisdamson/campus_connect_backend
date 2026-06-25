@@ -22,7 +22,8 @@ const MAX_BYTES = 8 * 1024 * 1024; // 8MB
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || 'campus-uploads';
+const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || 'campus-uploads'; // public media
+const SUPABASE_KYC_BUCKET = process.env.SUPABASE_KYC_BUCKET || 'campus-kyc'; // PRIVATE — KYC only
 const supabaseEnabled = SUPABASE_URL.startsWith('http') && SUPABASE_KEY.length > 0;
 
 // Keep the file in memory so we can stream it straight to Supabase (or write to
@@ -50,8 +51,8 @@ function randomName(file) {
   return `${Date.now()}_${crypto.randomBytes(8).toString('hex')}${ext}`;
 }
 
-async function putSupabase(file, objectPath) {
-  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/${objectPath}`, {
+async function putSupabase(file, objectPath, bucket = SUPABASE_BUCKET) {
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/${bucket}/${objectPath}`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${SUPABASE_KEY}`,
@@ -80,7 +81,7 @@ async function resolveKyc(key, baseUrl) {
   const name = media.keyName(key);
   if (!media.safeName(name)) return null;
   if (supabaseEnabled) {
-    const res = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/${SUPABASE_BUCKET}/kyc/${name}`, {
+    const res = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/${SUPABASE_KYC_BUCKET}/kyc/${name}`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${SUPABASE_KEY}`, apikey: SUPABASE_KEY, 'Content-Type': 'application/json' },
       body: JSON.stringify({ expiresIn: 600 }),
@@ -108,7 +109,7 @@ exports.create = asyncHandler(async (req, res) => {
   // KYC docs are private: stored off the public path, returned as an opaque key.
   if (req.body && req.body.purpose === 'kyc') {
     if (supabaseEnabled) {
-      await putSupabase(req.file, `kyc/${name}`);
+      await putSupabase(req.file, `kyc/${name}`, SUPABASE_KYC_BUCKET); // PRIVATE bucket
     } else {
       saveToDisk(PRIVATE_DIR, name, req.file);
     }
