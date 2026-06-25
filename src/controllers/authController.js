@@ -9,6 +9,10 @@ const { allowGuest } = require('../config/env');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+// OTPs are stored hashed at rest (never plaintext). Short expiry + single-use +
+// per-IP rate limiting make the low entropy safe in practice.
+const hashOtp = (v) => crypto.createHash('sha256').update(String(v)).digest('hex');
+
 // Public-safe user shape returned to clients.
 function publicUser(u) {
   return {
@@ -93,7 +97,7 @@ exports.login = asyncHandler(async (req, res) => {
 
 // POST /auth/google  { idToken } — verifies a Firebase ID token
 exports.google = asyncHandler(async (req, res) => {
-  const { idToken } = req.body;
+  const { idToken, universityId } = req.body;
   if (!idToken) fail(400, 'idToken is required');
 
   let decoded;
@@ -116,6 +120,7 @@ exports.google = asyncHandler(async (req, res) => {
         firebaseUid: decoded.uid, email: decoded.email || null,
         fullName: decoded.name || null, profilePhoto: decoded.picture || null,
         isVerified: !!decoded.email_verified, referralCode: genReferral(),
+        universityId: universityId || null,
       },
     });
   } else if (!user.firebaseUid) {
@@ -133,9 +138,9 @@ exports.requestOtp = asyncHandler(async (req, res) => {
   if (!phone) fail(400, 'Phone is required');
   const otp = '' + Math.floor(100000 + Math.random() * 900000);
   const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
-  await prisma.otpRecord.create({ data: { phone, otp, purpose: 'LOGIN', expiresAt } });
+  await prisma.otpRecord.create({ data: { phone, otp: hashOtp(otp), purpose: 'LOGIN', expiresAt } });
 
-  logger.info('[Auth] OTP issued', { phone });
+  logger.info('[Auth] OTP issued');
   const payload = { message: 'OTP sent' };
   if (process.env.NODE_ENV !== 'production') payload.devOtp = otp;
   return ok(res, payload);
@@ -147,7 +152,7 @@ exports.verifyOtp = asyncHandler(async (req, res) => {
   if (!phone || !otp) fail(400, 'Phone and otp are required');
 
   const record = await prisma.otpRecord.findFirst({
-    where: { phone, otp, used: false, expiresAt: { gt: new Date() } },
+    where: { phone, otp: hashOtp(otp), used: false, expiresAt: { gt: new Date() } },
     orderBy: { createdAt: 'desc' },
   });
   if (!record) fail(401, 'Invalid or expired OTP');

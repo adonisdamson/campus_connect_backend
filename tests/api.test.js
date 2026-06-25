@@ -90,8 +90,15 @@ describe('Rides — estimate, dispatch, accept, complete', () => {
     const accept = await api().post(`/api/v1/trips/${tripId}/accept`).set(auth(driver.token));
     expect(accept.body.trip.status).toBe('ACCEPTED');
 
-    const done = await api().patch(`/api/v1/trips/${tripId}/status`).set(auth(driver.token)).send({ status: 'COMPLETED' });
-    expect(done.body.trip.status).toBe('COMPLETED');
+    // Skipping straight to COMPLETED must be rejected (strict state machine).
+    const skip = await api().patch(`/api/v1/trips/${tripId}/status`).set(auth(driver.token)).send({ status: 'COMPLETED' });
+    expect(skip.status).toBe(409);
+
+    // Walk the real flow in order.
+    for (const status of ['ARRIVING', 'ARRIVED', 'IN_PROGRESS', 'COMPLETED']) {
+      const step = await api().patch(`/api/v1/trips/${tripId}/status`).set(auth(driver.token)).send({ status });
+      expect(step.body.trip.status).toBe(status);
+    }
 
     const dash = await api().get('/api/v1/drivers/dashboard').set(auth(driver.token));
     expect(dash.body.earnings.today).toBeGreaterThan(0);
@@ -207,6 +214,16 @@ describe('Wallet + coupons', () => {
     expect(top.body.balance).toBe(40);
   });
 
+  test('payout debits the wallet and rejects overdraw', async () => {
+    const { token } = await newUser();
+    await api().post('/api/v1/wallet/topup').set(auth(token)).send({ amount: 100 });
+    const payout = await api().post('/api/v1/wallet/payout').set(auth(token)).send({ amount: 30, momoNumber: '0240000000', network: 'MTN' });
+    expect(payout.status).toBe(201);
+    expect((await api().get('/api/v1/wallet').set(auth(token))).body.balance).toBe(70);
+    const over = await api().post('/api/v1/wallet/payout').set(auth(token)).send({ amount: 1000, momoNumber: '0240000000', network: 'MTN' });
+    expect(over.status).toBe(402);
+  });
+
   test('WELCOME10 coupon validates to a discount', async () => {
     const { token } = await newUser();
     const res = await api().post('/api/v1/coupons/validate').set(auth(token)).send({ code: 'WELCOME10', amount: 50, context: 'RIDE' });
@@ -233,6 +250,37 @@ describe('Uploads', () => {
     const png = Buffer.from('89504e470d0a1a0a', 'hex');
     const res = await api().post('/api/v1/uploads').attach('file', png, { filename: 'a.png', contentType: 'image/png' });
     expect(res.status).toBe(401);
+  });
+});
+
+describe('KYC privacy', () => {
+  test('KYC docs are private — opaque key, signed expiring view, no public URL', async () => {
+    const driver = await newUser();
+    const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+
+    // 1. A KYC upload returns an opaque key, never a public URL.
+    const up = await api().post('/api/v1/uploads').set(auth(driver.token))
+      .field('purpose', 'kyc')
+      .attach('file', png, { filename: 'id.png', contentType: 'image/png' });
+    expect(up.status).toBe(201);
+    expect(up.body.key).toMatch(/^kyc:/);
+    expect(up.body.url).toBeUndefined();
+
+    // 2. Submit verification referencing the private key.
+    const sub = await api().post('/api/v1/verification').set(auth(driver.token))
+      .send({ type: 'DRIVER', idDocType: 'GHANA_CARD', idFrontUrl: up.body.key, selfieUrl: up.body.key });
+    expect(sub.status).toBe(201);
+
+    // 3. Admin sees a signed /media/kyc URL — never the raw key.
+    const admin = await adminUser();
+    const list = await api().get('/api/v1/admin/verifications').query({ status: 'PENDING' }).set(auth(admin.token));
+    const rec = list.body.verifications.find((v) => v.id === sub.body.verification.id);
+    expect(rec.idFrontUrl).toMatch(/\/media\/kyc\/.+exp=.+sig=/);
+
+    // 4. The signed URL streams the file; a missing/forged signature is rejected.
+    const u = new URL(rec.idFrontUrl);
+    expect((await api().get(u.pathname + u.search)).status).toBe(200);
+    expect((await api().get(u.pathname)).status).toBe(401);
   });
 });
 

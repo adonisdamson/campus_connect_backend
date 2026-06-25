@@ -83,8 +83,23 @@ function initSocket(io) {
     });
 
     // ── Chat (typing indicator only; messages go through REST + fan-out) ──
-    socket.on('chat:typing', ({ conversationId, toUserId } = {}) => {
-      if (toUserId) io.to(`user:${toUserId}`).emit('chat:typing', { conversationId, from: user.id });
+    // Relay only when the sender AND target both belong to the conversation —
+    // never to an arbitrary client-supplied userId.
+    socket.on('chat:typing', async ({ conversationId, toUserId } = {}) => {
+      if (!conversationId || !toUserId || toUserId === user.id) return;
+      try {
+        const convo = await prisma.conversation.findFirst({
+          where: {
+            id: conversationId,
+            AND: [
+              { participants: { some: { userId: user.id } } },
+              { participants: { some: { userId: toUserId } } },
+            ],
+          },
+          select: { id: true },
+        });
+        if (convo) io.to(`user:${toUserId}`).emit('chat:typing', { conversationId, from: user.id });
+      } catch (_) { /* ignore typing-relay errors */ }
     });
 
     socket.on('disconnect', async () => {

@@ -1,6 +1,8 @@
 // Verification (KYC) — submit ID + selfie + face-match for driver/vendor/provider.
 const prisma = require('../config/database');
 const { asyncHandler, fail, ok } = require('../utils/http');
+const media = require('../utils/media');
+const uploads = require('./uploadController');
 
 const TYPES = ['DRIVER', 'VENDOR', 'SERVICE_PROVIDER'];
 const DOC_TYPES = ['GHANA_CARD', 'PASSPORT', 'DRIVERS_LICENSE', 'STUDENT_ID', 'VOTER_ID'];
@@ -12,11 +14,11 @@ exports.submit = asyncHandler(async (req, res) => {
   if (!DOC_TYPES.includes(idDocType)) fail(400, 'Invalid ID document type');
   if (!idFrontUrl || !selfieUrl) fail(400, 'idFrontUrl and selfieUrl are required');
 
-  // Documents must be real uploaded URLs — reject the legacy `local://` stubs and
-  // any non-http reference so an admin can actually inspect them.
-  const isUrl = (u) => /^https?:\/\/\S+$/.test(String(u));
-  if (!isUrl(idFrontUrl) || !isUrl(selfieUrl)) fail(400, 'Upload your ID and selfie images before submitting');
-  if (idBackUrl && !isUrl(idBackUrl)) fail(400, 'Invalid ID back image');
+  // Docs are either a private KYC key (`kyc:<name>`, preferred) or a real http
+  // URL (back-compat). Reject legacy stubs / anything else so admins can inspect.
+  const refOk = (u) => media.isKey(u) ? media.safeName(media.keyName(u)) : /^https?:\/\/\S+$/.test(String(u));
+  if (!refOk(idFrontUrl) || !refOk(selfieUrl)) fail(400, 'Upload your ID and selfie images before submitting');
+  if (idBackUrl && !refOk(idBackUrl)) fail(400, 'Invalid ID back image');
 
   // Re-submission overwrites any prior pending/rejected request of the same type.
   await prisma.verificationRequest.deleteMany({
@@ -40,7 +42,9 @@ exports.status = asyncHandler(async (req, res) => {
   const requests = await prisma.verificationRequest.findMany({
     where: { userId: req.user.id }, orderBy: { submittedAt: 'desc' },
   });
-  return ok(res, { verifications: requests });
+  const baseUrl = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
+  const signed = await Promise.all(requests.map((r) => uploads.withSignedDocs(r, baseUrl)));
+  return ok(res, { verifications: signed });
 });
 
 module.exports.TYPES = TYPES;

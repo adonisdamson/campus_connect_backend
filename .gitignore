@@ -7,3 +7,6 @@ dist/
 # Local uploaded media (served at /uploads) — never commit
 uploads/
 !uploads/.gitkeep
+
+# Private KYC documents (ID/selfie) — NEVER commit
+private-uploads/

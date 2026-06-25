@@ -32,7 +32,7 @@ exports.list = asyncHandler(async (req, res) => {
       orderBy: { createdAt: 'desc' },
       skip: (page - 1) * limit,
       take: limit,
-      include: { images: { orderBy: { position: 'asc' } }, category: true, seller: { select: { fullName: true, profilePhoto: true, rating: true } } },
+      include: { images: { orderBy: { position: 'asc' } }, category: true, seller: { select: { fullName: true, profilePhoto: true, rating: true, isVerified: true } } },
     }),
     prisma.listing.count({ where }),
   ]);
@@ -43,7 +43,9 @@ exports.list = asyncHandler(async (req, res) => {
 exports.getOne = asyncHandler(async (req, res) => {
   const listing = await prisma.listing.update({
     where: { id: req.params.id }, data: { viewCount: { increment: 1 } },
-    include: { images: { orderBy: { position: 'asc' } }, category: true, seller: { select: { id: true, fullName: true, profilePhoto: true, rating: true, phone: true } } },
+    // Seller phone is intentionally NOT exposed publicly — buyers reach sellers
+    // through in-app chat (POST /chat/start), not a leaked number.
+    include: { images: { orderBy: { position: 'asc' } }, category: true, seller: { select: { id: true, fullName: true, profilePhoto: true, rating: true, isVerified: true } } },
   }).catch(() => null);
   if (!listing) fail(404, 'Listing not found');
   return ok(res, { listing });

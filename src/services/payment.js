@@ -9,8 +9,17 @@ function isEnabled() {
   return enabled;
 }
 
+// Mock mode is a dev convenience only — it must NEVER run in production, where a
+// real provider is mandatory (otherwise top-ups/refunds would "succeed" for free).
+function assertUsable() {
+  if (!enabled && process.env.NODE_ENV === 'production') {
+    throw Object.assign(new Error('Payments are not configured'), { status: 503 });
+  }
+}
+
 // Initialize a transaction → returns an authorization URL the app opens.
 async function initialize({ email, amountGhs, reference, metadata }) {
+  assertUsable();
   if (!enabled) {
     logger.info('[Payment] mock initialize', { reference, amountGhs });
     return { mock: true, reference, authorization_url: null };
@@ -27,6 +36,7 @@ async function initialize({ email, amountGhs, reference, metadata }) {
 
 // Verify a transaction by reference.
 async function verify(reference) {
+  assertUsable();
   if (!enabled) return { status: 'success', mock: true, reference };
   const res = await fetch(`https://api.paystack.co/transaction/verify/${reference}`, {
     headers: { Authorization: `Bearer ${SECRET}` },

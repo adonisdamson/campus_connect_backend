@@ -2,7 +2,7 @@
 const prisma = require('../config/database');
 const { asyncHandler, fail, ok } = require('../utils/http');
 const { isProd } = require('../config/env');
-const { credit, getOrCreate } = require('../services/wallet');
+const { credit, debit, getOrCreate } = require('../services/wallet');
 
 // GET /wallet
 exports.get = asyncHandler(async (req, res) => {
@@ -47,8 +47,9 @@ exports.payout = asyncHandler(async (req, res) => {
   const amt = parseFloat(amount);
   if (!(amt > 0)) fail(400, 'amount must be positive');
   if (!momoNumber || !network) fail(400, 'momoNumber and network required');
-  const wallet = await getOrCreate(req.user.id);
-  if (Number(wallet.balance) < amt) fail(402, 'Insufficient balance');
+  // Debit immediately (atomic, throws 402 if short) so the funds are held for the
+  // payout — prevents requesting more than the balance or double-spending after.
+  await debit(req.user.id, amt, 'PAYOUT', { contextType: 'PAYOUT' });
   const request = await prisma.payoutRequest.create({ data: { userId: req.user.id, amount: amt, momoNumber, network } });
   return ok(res, { payout: request, message: 'Payout requested — processed within 24h' }, 201);
 });

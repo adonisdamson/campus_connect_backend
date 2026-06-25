@@ -49,11 +49,14 @@ app.get('/health', async (req, res) => {
   res.json({ success: true, service: 'campus-connect-api', db, sockets: io.engine.clientsCount, time: new Date().toISOString() });
 });
 
-// Serve uploaded media (KYC docs, photos). Files are random-named; access to the
-// API that returns these URLs is already authenticated.
+// Serve PUBLIC uploaded media only (vendor/listing/service photos). KYC docs are
+// NOT here — they live in a private dir reached solely via signed /media URLs.
 app.use('/uploads', express.static(require('path').join(__dirname, '../uploads'), {
   maxAge: '7d', index: false, dotfiles: 'deny',
 }));
+
+// Private KYC media — only a valid short-lived signed token (?exp&sig) streams it.
+app.get('/media/kyc/:name', require('./controllers/uploadController').serveKyc);
 
 // API
 app.use('/api/v1', apiRoutes);

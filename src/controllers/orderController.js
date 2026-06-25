@@ -3,7 +3,7 @@ const prisma = require('../config/database');
 const { asyncHandler, fail, ok } = require('../utils/http');
 const { estimateDelivery } = require('../services/pricing');
 const { dispatchOrder } = require('../services/dispatch');
-const { credit, debit, getOrCreate } = require('../services/wallet');
+const { credit, debit, getOrCreate, creditTx, debitTx } = require('../services/wallet');
 const { notify } = require('../services/notify');
 
 const TYPES = ['FOOD', 'PARCEL', 'SHOPPING', 'GAS'];
@@ -119,29 +119,47 @@ exports.updateStatus = asyncHandler(async (req, res) => {
           : false;
   if (!allowed) fail(403, 'Not authorized to update this order');
 
-  const stamp = { CONFIRMED: 'confirmedAt', READY: 'readyAt', PICKED_UP: 'pickedUpAt', DELIVERED: 'deliveredAt', CANCELLED: 'cancelledAt' }[status];
-  const updated = await prisma.deliveryOrder.update({
-    where: { id: order.id }, data: { status, ...(stamp ? { [stamp]: new Date() } : {}) },
-  });
+  // Strict lifecycle: a finished order is immutable, and status only moves
+  // forward (no going back, no re-delivering → no double settlement).
+  if (['DELIVERED', 'CANCELLED'].includes(order.status)) fail(409, 'Order already finished');
+  if (status !== 'CANCELLED') {
+    const ORDER_FLOW = ['PENDING', 'CONFIRMED', 'PREPARING', 'READY', 'PICKED_UP', 'IN_TRANSIT', 'DELIVERED'];
+    if (ORDER_FLOW.indexOf(status) <= ORDER_FLOW.indexOf(order.status)) {
+      fail(409, `Cannot move from ${order.status} to ${status}`);
+    }
+  }
 
   const io = req.app.get('io');
+  const stamp = { CONFIRMED: 'confirmedAt', READY: 'readyAt', PICKED_UP: 'pickedUpAt', DELIVERED: 'deliveredAt', CANCELLED: 'cancelledAt' }[status];
 
-  // When food is READY, dispatch a courier.
-  if (status === 'READY' && !order.courierId) await dispatchOrder(io, updated);
-
+  let updated;
   if (status === 'DELIVERED') {
-    // Wallet customers pay now; cash settles in person. Courier + vendor get paid.
-    if (order.paymentMethod === 'WALLET') {
-      await debit(order.customerId, Number(order.total), 'ORDER_PAYMENT', { contextType: 'ORDER', contextId: order.id }).catch(() => {});
-    }
-    if (order.courierId) {
-      await credit(order.courierId, Number(order.deliveryFee), 'ORDER_PAYMENT', { contextType: 'ORDER', contextId: order.id });
-    }
-    if (order.vendorId && Number(order.subtotal) > 0) {
-      const vendor = await prisma.vendor.findUnique({ where: { id: order.vendorId }, select: { ownerId: true } });
-      if (vendor) await credit(vendor.ownerId, Number(order.subtotal), 'ORDER_PAYMENT', { contextType: 'ORDER', contextId: order.id });
-    }
-    await prisma.deliveryOrder.update({ where: { id: order.id }, data: { paymentStatus: 'PAID' } });
+    // Settle atomically: customer debit (WALLET) + courier + vendor credits + the
+    // status flip all commit together or roll back. Previously the customer debit
+    // was .catch()-swallowed, so a short balance still paid courier/vendor (money
+    // from nothing). Unique references make replays idempotent.
+    updated = await prisma.$transaction(async (tx) => {
+      if (order.paymentMethod === 'WALLET') {
+        await debitTx(tx, order.customerId, Number(order.total), 'ORDER_PAYMENT', { contextType: 'ORDER', contextId: order.id, reference: `ORD_PAY_${order.id}` });
+      }
+      if (order.courierId) {
+        await creditTx(tx, order.courierId, Number(order.deliveryFee), 'ORDER_PAYMENT', { contextType: 'ORDER', contextId: order.id, reference: `ORD_COUR_${order.id}` });
+      }
+      if (order.vendorId && Number(order.subtotal) > 0) {
+        const vendor = await tx.vendor.findUnique({ where: { id: order.vendorId }, select: { ownerId: true } });
+        if (vendor) await creditTx(tx, vendor.ownerId, Number(order.subtotal), 'ORDER_PAYMENT', { contextType: 'ORDER', contextId: order.id, reference: `ORD_VEND_${order.id}` });
+      }
+      return tx.deliveryOrder.update({
+        where: { id: order.id },
+        data: { status, ...(stamp ? { [stamp]: new Date() } : {}), paymentStatus: 'PAID' },
+      });
+    });
+  } else {
+    updated = await prisma.deliveryOrder.update({
+      where: { id: order.id }, data: { status, ...(stamp ? { [stamp]: new Date() } : {}) },
+    });
+    // When food is READY, dispatch a courier.
+    if (status === 'READY' && !order.courierId) await dispatchOrder(io, updated);
   }
 
   io.to(`user:${order.customerId}`).emit('order:status-changed', { orderId: order.id, status });

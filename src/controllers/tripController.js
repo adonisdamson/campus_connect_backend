@@ -4,7 +4,7 @@ const { asyncHandler, fail, ok } = require('../utils/http');
 const { estimateRide } = require('../services/pricing');
 const { dispatchTrip } = require('../services/dispatch');
 const { computeSurge } = require('../services/surge');
-const { credit, debit, getOrCreate } = require('../services/wallet');
+const { credit, debit, getOrCreate, creditTx, debitTx } = require('../services/wallet');
 const { notify } = require('../services/notify');
 
 const RIDE_CLASSES = ['ECONOMY', 'PREMIUM', 'BIKE', 'SHARED'];
@@ -122,26 +122,36 @@ exports.updateStatus = asyncHandler(async (req, res) => {
   const trip = await prisma.trip.findUnique({ where: { id: req.params.id } });
   if (!trip) fail(404, 'Trip not found');
   if (trip.driverId !== req.user.id) fail(403, 'Not your trip');
+  // Enforce strict, in-order transitions — no skipping (e.g. straight to
+  // COMPLETED) and no re-completing a finished trip.
+  if (DRIVER_FLOW.indexOf(status) !== DRIVER_FLOW.indexOf(trip.status) + 1) {
+    fail(409, `Cannot move from ${trip.status} to ${status}`);
+  }
 
   const io = req.app.get('io');
   const stamp = { ARRIVING: 'arrivingAt', ARRIVED: 'arrivedAt', IN_PROGRESS: 'startedAt', COMPLETED: 'completedAt' }[status];
-  const data = { status, [stamp]: new Date() };
+  const baseData = { status, [stamp]: new Date() };
   const fare = Number(trip.fareEstimate);
 
+  let updated;
   if (status === 'COMPLETED') {
-    data.fareFinal = trip.fareEstimate;
-    // Wallet riders pay now; cash settles in person. Either way the driver is credited.
-    if (trip.paymentMethod === 'WALLET') {
-      await debit(trip.riderId, fare, 'RIDE_PAYMENT', { contextType: 'TRIP', contextId: trip.id });
-    }
-    data.paymentStatus = 'PAID';
-  }
-  const updated = await prisma.trip.update({ where: { id: trip.id }, data });
-
-  if (status === 'COMPLETED') {
-    await credit(trip.driverId, fare, 'RIDE_PAYMENT', { contextType: 'TRIP', contextId: trip.id });
-    const dp = await prisma.driverProfile.findUnique({ where: { userId: trip.driverId } });
-    if (dp) await prisma.driverProfile.update({ where: { id: dp.id }, data: { totalTrips: { increment: 1 } } });
+    // Settle atomically: rider debit (WALLET), trip update, driver credit and the
+    // trip counter all commit together or not at all. Unique references make it
+    // idempotent — a replay can't double-pay. (Cash settles in person; the driver
+    // is still credited their earnings either way.)
+    updated = await prisma.$transaction(async (tx) => {
+      const data = { ...baseData, fareFinal: trip.fareEstimate, paymentStatus: 'PAID' };
+      if (trip.paymentMethod === 'WALLET') {
+        await debitTx(tx, trip.riderId, fare, 'RIDE_PAYMENT', { contextType: 'TRIP', contextId: trip.id, reference: `RIDE_PAY_${trip.id}` });
+      }
+      const t = await tx.trip.update({ where: { id: trip.id }, data });
+      await creditTx(tx, trip.driverId, fare, 'RIDE_PAYMENT', { contextType: 'TRIP', contextId: trip.id, reference: `RIDE_EARN_${trip.id}` });
+      const dp = await tx.driverProfile.findUnique({ where: { userId: trip.driverId } });
+      if (dp) await tx.driverProfile.update({ where: { id: dp.id }, data: { totalTrips: { increment: 1 } } });
+      return t;
+    });
+  } else {
+    updated = await prisma.trip.update({ where: { id: trip.id }, data: baseData });
   }
 
   io.to(`user:${trip.riderId}`).emit('trip:status-changed', { tripId: trip.id, status });

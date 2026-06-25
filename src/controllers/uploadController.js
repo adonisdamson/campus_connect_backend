@@ -9,9 +9,13 @@ const crypto = require('crypto');
 const multer = require('multer');
 const logger = require('../config/logger');
 const { asyncHandler, fail, ok } = require('../utils/http');
+const media = require('../utils/media');
 
-const UPLOAD_DIR = path.join(__dirname, '../../uploads');
+const UPLOAD_DIR = path.join(__dirname, '../../uploads'); // public media
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+// KYC docs live here — NEVER served by the public /uploads static handler.
+const PRIVATE_DIR = path.join(__dirname, '../../private-uploads');
+fs.mkdirSync(PRIVATE_DIR, { recursive: true });
 
 const ALLOWED = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/heic': '.heic' };
 const MAX_BYTES = 8 * 1024 * 1024; // 8MB
@@ -46,8 +50,7 @@ function randomName(file) {
   return `${Date.now()}_${crypto.randomBytes(8).toString('hex')}${ext}`;
 }
 
-async function uploadToSupabase(file, name) {
-  const objectPath = `uploads/${name}`;
+async function putSupabase(file, objectPath) {
   const res = await fetch(`${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/${objectPath}`, {
     method: 'POST',
     headers: {
@@ -64,29 +67,81 @@ async function uploadToSupabase(file, name) {
     logger.error('[Upload] Supabase storage error', { status: res.status, body: body.slice(0, 200) });
     throw Object.assign(new Error('Upload failed'), { status: 502 });
   }
-  return `${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${objectPath}`;
 }
 
-function saveToDisk(file, name) {
-  fs.writeFileSync(path.join(UPLOAD_DIR, name), file.buffer);
+function saveToDisk(dir, name, file) {
+  fs.writeFileSync(path.join(dir, name), file.buffer);
 }
 
-// POST /uploads  (multipart, field: file) → { url }
+// Turn a stored KYC key (`kyc:<name>`) into a short-lived viewable URL:
+// a Supabase signed URL in prod, or our own signed /media route on local disk.
+async function resolveKyc(key, baseUrl) {
+  if (!media.isKey(key)) return key; // already a plain URL (back-compat) or empty
+  const name = media.keyName(key);
+  if (!media.safeName(name)) return null;
+  if (supabaseEnabled) {
+    const res = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/${SUPABASE_BUCKET}/kyc/${name}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${SUPABASE_KEY}`, apikey: SUPABASE_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expiresIn: 600 }),
+    });
+    const data = await res.json().catch(() => null);
+    return data && data.signedURL ? `${SUPABASE_URL}/storage/v1${data.signedURL}` : null;
+  }
+  return media.signedUrl(name, baseUrl);
+}
+
+// Replace any KYC keys on a verification record with fresh signed URLs for viewing.
+async function withSignedDocs(record, baseUrl) {
+  const out = { ...record };
+  for (const f of ['idFrontUrl', 'idBackUrl', 'selfieUrl']) {
+    if (media.isKey(out[f])) out[f] = await resolveKyc(out[f], baseUrl);
+  }
+  return out;
+}
+
+// POST /uploads  (multipart, field: file; optional body purpose=kyc) → { url } or { key }
 exports.create = asyncHandler(async (req, res) => {
   if (!req.file) fail(400, 'No file uploaded (field name must be "file")');
   const name = randomName(req.file);
 
+  // KYC docs are private: stored off the public path, returned as an opaque key.
+  if (req.body && req.body.purpose === 'kyc') {
+    if (supabaseEnabled) {
+      await putSupabase(req.file, `kyc/${name}`);
+    } else {
+      saveToDisk(PRIVATE_DIR, name, req.file);
+    }
+    return ok(res, { key: `${media.KEY_PREFIX}${name}`, filename: name, size: req.file.size }, 201);
+  }
+
   let url;
   if (supabaseEnabled) {
-    url = await uploadToSupabase(req.file, name);
+    await putSupabase(req.file, `uploads/${name}`);
+    url = `${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/uploads/${name}`;
   } else {
-    saveToDisk(req.file, name);
+    saveToDisk(UPLOAD_DIR, name, req.file);
     const base = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
     url = `${base}/uploads/${name}`;
   }
   return ok(res, { url, filename: name, size: req.file.size }, 201);
 });
 
+// GET /media/kyc/:name?exp&sig — stream a private KYC file when the signed token
+// is valid. (In Supabase mode, viewers get a Supabase signed URL instead and this
+// route is unused.)
+exports.serveKyc = (req, res) => {
+  const { name } = req.params;
+  const { exp, sig } = req.query;
+  if (!media.verify(name, exp, sig)) return res.status(401).send('Forbidden');
+  const file = path.join(PRIVATE_DIR, path.basename(name));
+  if (!fs.existsSync(file)) return res.status(404).send('Not found');
+  return res.sendFile(file);
+};
+
 exports.single = single;
 exports.UPLOAD_DIR = UPLOAD_DIR;
+exports.PRIVATE_DIR = PRIVATE_DIR;
 exports.supabaseEnabled = supabaseEnabled;
+exports.resolveKyc = resolveKyc;
+exports.withSignedDocs = withSignedDocs;

@@ -4,6 +4,7 @@ const { asyncHandler, fail, ok } = require('../utils/http');
 const { credit } = require('../services/wallet');
 const { notify } = require('../services/notify');
 const { evictUserCache } = require('../middleware/auth');
+const uploads = require('./uploadController');
 
 // GET /admin/dashboard
 exports.dashboard = asyncHandler(async (req, res) => {
@@ -72,7 +73,10 @@ exports.verifications = asyncHandler(async (req, res) => {
     where: { status }, orderBy: { submittedAt: 'asc' },
     include: { user: { select: { id: true, fullName: true, email: true, phone: true, address: true } } },
   });
-  return ok(res, { verifications: requests });
+  // Private KYC keys → short-lived signed URLs the admin app can actually load.
+  const baseUrl = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
+  const signed = await Promise.all(requests.map((r) => uploads.withSignedDocs(r, baseUrl)));
+  return ok(res, { verifications: signed });
 });
 
 // PATCH /admin/verifications/:id  { decision: 'APPROVED'|'REJECTED', note? }
@@ -94,6 +98,7 @@ exports.reviewVerification = asyncHandler(async (req, res) => {
     if (reqRecord.type === 'VENDOR') await prisma.vendor.updateMany({ where: { ownerId: reqRecord.userId }, data: { status: 'APPROVED' } });
     if (reqRecord.type === 'SERVICE_PROVIDER') await prisma.serviceProviderProfile.updateMany({ where: { userId: reqRecord.userId }, data: { status: 'APPROVED' } });
   }
+  await prisma.auditLog.create({ data: { actorId: req.user.id, action: 'VERIFICATION_REVIEW', entityType: 'VerificationRequest', entityId: reqRecord.id, meta: { decision } } });
   await prisma.notification.create({
     data: { userId: reqRecord.userId, title: `Verification ${decision.toLowerCase()}`, body: note || `Your ${reqRecord.type} verification was ${decision.toLowerCase()}`, type: 'SYSTEM' },
   });
